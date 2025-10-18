@@ -15,7 +15,6 @@
  */
 package io.javaoperatorsdk.operator.processing.event.source.informer;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,6 +24,7 @@ import org.slf4j.LoggerFactory;
 
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.javaoperatorsdk.operator.api.config.ConfigurationService;
+import io.javaoperatorsdk.operator.api.reconciler.PrimaryUpdateAndCacheUtils;
 import io.javaoperatorsdk.operator.processing.dependent.kubernetes.KubernetesDependentResource;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 
@@ -46,53 +46,10 @@ import io.javaoperatorsdk.operator.processing.event.ResourceID;
  */
 public class TemporaryResourceCache<T extends HasMetadata> {
 
-  static class ExpirationCache<K> {
-    private final LinkedHashMap<K, Long> cache;
-    private final int ttlMs;
-
-    public ExpirationCache(int maxEntries, int ttlMs) {
-      this.ttlMs = ttlMs;
-      this.cache =
-          new LinkedHashMap<>() {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<K, Long> eldest) {
-              return size() > maxEntries;
-            }
-          };
-    }
-
-    public void add(K key) {
-      clean();
-      cache.putIfAbsent(key, System.currentTimeMillis());
-    }
-
-    public boolean contains(K key) {
-      clean();
-      return cache.get(key) != null;
-    }
-
-    void clean() {
-      if (!cache.isEmpty()) {
-        long currentTimeMillis = System.currentTimeMillis();
-        var iter = cache.entrySet().iterator();
-        // the order will already be from oldest to newest, clean a fixed number of entries to
-        // amortize the cost amongst multiple calls
-        for (int i = 0; i < 10 && iter.hasNext(); i++) {
-          var entry = iter.next();
-          if (currentTimeMillis - entry.getValue() > ttlMs) {
-            iter.remove();
-          }
-        }
-      }
-    }
-  }
-
   private static final Logger log = LoggerFactory.getLogger(TemporaryResourceCache.class);
 
   private final Map<ResourceID, T> cache = new ConcurrentHashMap<>();
 
-  // keep up to the last million deletions for up to 10 minutes
-  private final ExpirationCache<String> tombstones = new ExpirationCache<>(1000000, 1200000);
   private final ManagedInformerEventSource<T, ?, ?> managedInformerEventSource;
   private final boolean parseResourceVersions;
 
@@ -104,7 +61,6 @@ public class TemporaryResourceCache<T extends HasMetadata> {
   }
 
   public synchronized void onDeleteEvent(T resource, boolean unknownState) {
-    tombstones.add(resource.getMetadata().getUid());
     onEvent(resource, unknownState);
   }
 
@@ -130,37 +86,37 @@ public class TemporaryResourceCache<T extends HasMetadata> {
    * @param previousResourceVersion null indicates an add
    */
   public synchronized void putResource(T newResource, String previousResourceVersion) {
-    var resourceId = ResourceID.fromResource(newResource);
-    var cachedResource = managedInformerEventSource.get(resourceId).orElse(null);
-
-    boolean moveAhead = false;
-    if (previousResourceVersion == null && cachedResource == null) {
-      if (tombstones.contains(newResource.getMetadata().getUid())) {
-        log.debug(
-            "Won't resurrect uid {} for resource id: {}",
-            newResource.getMetadata().getUid(),
-            resourceId);
-        return;
-      }
-      // we can skip further checks as this is a simple add and there's no previous entry to
-      // consider
-      moveAhead = true;
+    if (!parseResourceVersions) {
+      return;
     }
 
-    if (moveAhead
-        || (cachedResource != null
-                && (cachedResource
-                    .getMetadata()
-                    .getResourceVersion()
-                    .equals(previousResourceVersion))
-            || isLaterResourceVersion(resourceId, newResource, cachedResource))) {
+    var resourceId = ResourceID.fromResource(newResource);
+
+    String latest =
+        managedInformerEventSource
+            .getLastSyncResourceVersion(resourceId.getNamespace())
+            .orElse(null);
+    if (latest != null
+        && PrimaryUpdateAndCacheUtils.compareResourceVersions(
+                latest, newResource.getMetadata().getResourceVersion())
+            >= 0) {
+      log.debug(
+          "Resource {}: resourceVersion {} is not later than latest {}",
+          resourceId,
+          newResource.getMetadata().getResourceVersion(),
+          latest);
+      return;
+    }
+
+    var cachedResource = managedInformerEventSource.get(resourceId).orElse(null);
+
+    if (cachedResource == null
+        || PrimaryUpdateAndCacheUtils.compareResourceVersions(newResource, cachedResource) > 0) {
       log.debug(
           "Temporarily moving ahead to target version {} for resource id: {}",
           newResource.getMetadata().getResourceVersion(),
           resourceId);
       cache.put(resourceId, newResource);
-    } else if (cache.remove(resourceId) != null) {
-      log.debug("Removed an obsolete resource from cache for id: {}", resourceId);
     }
   }
 
@@ -170,20 +126,8 @@ public class TemporaryResourceCache<T extends HasMetadata> {
    *     cachedResource, otherwise false
    */
   public boolean isLaterResourceVersion(ResourceID resourceId, T newResource, T cachedResource) {
-    try {
-      if (parseResourceVersions
-          && Long.parseLong(newResource.getMetadata().getResourceVersion())
-              > Long.parseLong(cachedResource.getMetadata().getResourceVersion())) {
-        return true;
-      }
-    } catch (NumberFormatException e) {
-      log.debug(
-          "Could not compare resourceVersions {} and {} for {}",
-          newResource.getMetadata().getResourceVersion(),
-          cachedResource.getMetadata().getResourceVersion(),
-          resourceId);
-    }
-    return false;
+    return parseResourceVersions
+        && PrimaryUpdateAndCacheUtils.compareResourceVersions(newResource, cachedResource) > 0;
   }
 
   public synchronized Optional<T> getResourceFromCache(ResourceID resourceID) {
