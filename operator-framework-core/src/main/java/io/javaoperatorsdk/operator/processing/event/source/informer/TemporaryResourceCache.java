@@ -23,7 +23,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.fabric8.kubernetes.api.model.HasMetadata;
-import io.javaoperatorsdk.operator.api.config.ConfigurationService;
 import io.javaoperatorsdk.operator.api.reconciler.PrimaryUpdateAndCacheUtils;
 import io.javaoperatorsdk.operator.processing.dependent.kubernetes.KubernetesDependentResource;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
@@ -72,26 +71,29 @@ public class TemporaryResourceCache<T extends HasMetadata> {
     cache.computeIfPresent(
         ResourceID.fromResource(resource),
         (id, cached) ->
-            (unknownState || !isLaterResourceVersion(id, cached, resource)) ? null : cached);
+            (unknownState
+                    || PrimaryUpdateAndCacheUtils.compareResourceVersions(resource, cached) > 0)
+                ? null
+                : cached);
   }
 
   public synchronized void putAddedResource(T newResource) {
-    putResource(newResource, null);
+    putResource(newResource);
   }
 
   /**
    * put the item into the cache if the previousResourceVersion matches the current state. If not
    * the currently cached item is removed.
-   *
-   * @param previousResourceVersion null indicates an add
    */
-  public synchronized void putResource(T newResource, String previousResourceVersion) {
+  public synchronized void putResource(T newResource) {
     if (!parseResourceVersions) {
       return;
     }
 
     var resourceId = ResourceID.fromResource(newResource);
 
+    // first check against the source in general - this also prevents resurrecting resources when
+    // we've already seen the deletion event
     String latest =
         managedInformerEventSource
             .getLastSyncResourceVersion(resourceId.getNamespace())
@@ -99,7 +101,7 @@ public class TemporaryResourceCache<T extends HasMetadata> {
     if (latest != null
         && PrimaryUpdateAndCacheUtils.compareResourceVersions(
                 latest, newResource.getMetadata().getResourceVersion())
-            >= 0) {
+            > 0) {
       log.debug(
           "Resource {}: resourceVersion {} is not later than latest {}",
           resourceId,
@@ -111,7 +113,7 @@ public class TemporaryResourceCache<T extends HasMetadata> {
     var cachedResource = managedInformerEventSource.get(resourceId).orElse(null);
 
     if (cachedResource == null
-        || PrimaryUpdateAndCacheUtils.compareResourceVersions(newResource, cachedResource) > 0) {
+        || PrimaryUpdateAndCacheUtils.compareResourceVersions(newResource, cachedResource) >= 0) {
       log.debug(
           "Temporarily moving ahead to target version {} for resource id: {}",
           newResource.getMetadata().getResourceVersion(),
@@ -120,14 +122,12 @@ public class TemporaryResourceCache<T extends HasMetadata> {
     }
   }
 
-  /**
-   * @return true if {@link ConfigurationService#parseResourceVersionsForEventFilteringAndCaching()}
-   *     is enabled and the resourceVersion of newResource is numerically greater than
-   *     cachedResource, otherwise false
-   */
-  public boolean isLaterResourceVersion(ResourceID resourceId, T newResource, T cachedResource) {
+  public boolean canSkipEvent(ResourceID resourceID, T resource) {
     return parseResourceVersions
-        && PrimaryUpdateAndCacheUtils.compareResourceVersions(newResource, cachedResource) > 0;
+        && getResourceFromCache(resourceID)
+            .filter(
+                cached -> PrimaryUpdateAndCacheUtils.compareResourceVersions(cached, resource) >= 0)
+            .isPresent();
   }
 
   public synchronized Optional<T> getResourceFromCache(ResourceID resourceID) {
