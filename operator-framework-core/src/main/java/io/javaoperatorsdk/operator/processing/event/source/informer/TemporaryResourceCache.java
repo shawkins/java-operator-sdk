@@ -130,6 +130,10 @@ public class TemporaryResourceCache<T extends HasMetadata> {
    * @param previousResourceVersion null indicates an add
    */
   public synchronized void putResource(T newResource, String previousResourceVersion) {
+    if (!parseResourceVersions) {
+      return;
+    }
+
     var resourceId = ResourceID.fromResource(newResource);
     var cachedResource = managedInformerEventSource.get(resourceId).orElse(null);
 

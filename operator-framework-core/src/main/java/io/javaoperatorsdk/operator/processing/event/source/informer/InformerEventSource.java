@@ -92,7 +92,7 @@ public class InformerEventSource<R extends HasMetadata, P extends HasMetadata>
   }
 
   InformerEventSource(InformerEventSourceConfiguration<R> configuration, KubernetesClient client) {
-    this(configuration, client, false);
+    this(configuration, client, true);
   }
 
   @SuppressWarnings({"unchecked", "rawtypes"})
