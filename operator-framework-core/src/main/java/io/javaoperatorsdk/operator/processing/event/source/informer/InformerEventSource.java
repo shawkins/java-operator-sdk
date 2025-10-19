@@ -207,11 +207,8 @@ public class InformerEventSource<R extends HasMetadata, P extends HasMetadata>
   }
 
   private boolean canSkipEvent(R newObject, R oldObject, ResourceID resourceID) {
-    var res = temporaryResourceCache.getResourceFromCache(resourceID);
-    if (res.isEmpty()) {
-      return isEventKnownFromAnnotation(newObject, oldObject);
-    }
-    return temporaryResourceCache.isLaterResourceVersion(resourceID, res.get(), newObject);
+    return temporaryResourceCache.canSkipEvent(resourceID, newObject)
+        || isEventKnownFromAnnotation(newObject, oldObject);
   }
 
   private boolean isEventKnownFromAnnotation(R newObject, R oldObject) {
@@ -291,11 +288,7 @@ public class InformerEventSource<R extends HasMetadata, P extends HasMetadata>
 
   private void handleRecentCreateOrUpdate(Operation operation, R newResource, R oldResource) {
     primaryToSecondaryIndex.onAddOrUpdate(newResource);
-    temporaryResourceCache.putResource(
-        newResource,
-        Optional.ofNullable(oldResource)
-            .map(r -> r.getMetadata().getResourceVersion())
-            .orElse(null));
+    temporaryResourceCache.putResource(newResource);
   }
 
   private boolean useSecondaryToPrimaryIndex() {

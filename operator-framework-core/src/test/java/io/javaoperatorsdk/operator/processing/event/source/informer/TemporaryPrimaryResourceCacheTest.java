@@ -53,20 +53,18 @@ class TemporaryPrimaryResourceCacheTest {
     prevTestResource.getMetadata().setResourceVersion("1");
     when(informerEventSource.get(any())).thenReturn(Optional.of(prevTestResource));
 
-    temporaryResourceCache.putResource(testResource, "2");
+    temporaryResourceCache.putResource(testResource);
 
     var cached = temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource));
     assertThat(cached).isPresent();
   }
 
   @Test
-  void updateNotAddsTheResourceIntoCacheIfTheInformerHasOtherVersion() {
+  void updateNotAddsTheResourceIntoCacheIfTheInformerHasLaterVersion() {
     var testResource = testResource();
-    var informerCachedResource = testResource();
-    informerCachedResource.getMetadata().setResourceVersion("2");
-    when(informerEventSource.get(any())).thenReturn(Optional.of(informerCachedResource));
+    when(informerEventSource.getLastSyncResourceVersion(any())).thenReturn(Optional.of("3"));
 
-    temporaryResourceCache.putResource(testResource, "1");
+    temporaryResourceCache.putResource(testResource);
 
     var cached = temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource));
     assertThat(cached).isNotPresent();
@@ -88,7 +86,12 @@ class TemporaryPrimaryResourceCacheTest {
     var testResource = testResource();
     when(informerEventSource.get(any())).thenReturn(Optional.of(testResource()));
 
-    temporaryResourceCache.putAddedResource(testResource);
+    temporaryResourceCache.putAddedResource(
+        new ConfigMapBuilder(testResource)
+            .editMetadata()
+            .withResourceVersion("1")
+            .endMetadata()
+            .build());
 
     var cached = temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource));
     assertThat(cached).isNotPresent();
@@ -98,34 +101,25 @@ class TemporaryPrimaryResourceCacheTest {
   void removesResourceFromCache() {
     ConfigMap testResource = propagateTestResourceToCache();
 
-    temporaryResourceCache.onAddOrUpdateEvent(testResource());
+    temporaryResourceCache.onAddOrUpdateEvent(
+        new ConfigMapBuilder(testResource)
+            .editMetadata()
+            .withResourceVersion("3")
+            .endMetadata()
+            .build());
 
     assertThat(temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource)))
         .isNotPresent();
   }
 
   @Test
-  void resourceVersionParsing() {
-    this.temporaryResourceCache = new TemporaryResourceCache<>(informerEventSource, true);
+  void resourceNoVersionParsing() {
+    this.temporaryResourceCache = new TemporaryResourceCache<>(informerEventSource, false);
 
-    ConfigMap testResource = propagateTestResourceToCache();
+    this.temporaryResourceCache.putResource(testResource());
 
-    // an event with a newer version will not remove
-    temporaryResourceCache.onAddOrUpdateEvent(
-        new ConfigMapBuilder(testResource)
-            .editMetadata()
-            .withResourceVersion("1")
-            .endMetadata()
-            .build());
-
-    assertThat(temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource)))
-        .isPresent();
-
-    // anything else will remove
-    temporaryResourceCache.onAddOrUpdateEvent(testResource());
-
-    assertThat(temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource)))
-        .isNotPresent();
+    assertThat(temporaryResourceCache.getResourceFromCache(ResourceID.fromResource(testResource())))
+        .isEmpty();
   }
 
   @Test

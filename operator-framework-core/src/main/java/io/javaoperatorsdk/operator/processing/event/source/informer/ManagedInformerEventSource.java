@@ -123,8 +123,7 @@ public abstract class ManagedInformerEventSource<
   @Override
   public void handleRecentResourceUpdate(
       ResourceID resourceID, R resource, R previousVersionOfResource) {
-    temporaryResourceCache.putResource(
-        resource, previousVersionOfResource.getMetadata().getResourceVersion());
+    temporaryResourceCache.putResource(resource);
   }
 
   @Override
