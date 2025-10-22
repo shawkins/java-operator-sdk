@@ -18,6 +18,7 @@ package io.javaoperatorsdk.operator.processing.event.source.informer;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,6 +53,8 @@ public class TemporaryResourceCache<T extends HasMetadata> {
   private final ManagedInformerEventSource<T, ?, ?> managedInformerEventSource;
   private final boolean parseResourceVersions;
 
+  private Map<ResourceID, ReentrantLock> activelyModifying = new ConcurrentHashMap<>();
+
   public TemporaryResourceCache(
       ManagedInformerEventSource<T, ?, ?> managedInformerEventSource,
       boolean parseResourceVersions) {
@@ -59,22 +62,57 @@ public class TemporaryResourceCache<T extends HasMetadata> {
     this.parseResourceVersions = parseResourceVersions;
   }
 
-  public synchronized void onDeleteEvent(T resource, boolean unknownState) {
+  public void startModifying(ResourceID id) {
+    activelyModifying
+        .compute(
+            id,
+            (ignored, lock) -> {
+              if (lock != null) {
+                throw new IllegalStateException();
+              }
+              return new ReentrantLock();
+            })
+        .lock();
+  }
+
+  public void doneModifying(ResourceID id) {
+    activelyModifying.computeIfPresent(
+        id,
+        (ignored, lock) -> {
+          lock.unlock();
+          return null;
+        });
+  }
+
+  public void onDeleteEvent(T resource, boolean unknownState) {
     onEvent(resource, unknownState);
   }
 
-  public synchronized void onAddOrUpdateEvent(T resource) {
+  public void onAddOrUpdateEvent(T resource) {
     onEvent(resource, false);
   }
 
-  synchronized void onEvent(T resource, boolean unknownState) {
-    cache.computeIfPresent(
-        ResourceID.fromResource(resource),
-        (id, cached) ->
-            (unknownState
-                    || PrimaryUpdateAndCacheUtils.compareResourceVersions(resource, cached) >= 0)
-                ? null
-                : cached);
+  void onEvent(T resource, boolean unknownState) {
+    ReentrantLock lock = activelyModifying.get(ResourceID.fromResource(resource));
+    if (lock != null) {
+      lock.lock();
+    }
+    try {
+      synchronized (this) {
+        cache.computeIfPresent(
+            ResourceID.fromResource(resource),
+            (id, cached) ->
+                (unknownState
+                        || PrimaryUpdateAndCacheUtils.compareResourceVersions(resource, cached)
+                            > 0)
+                    ? null
+                    : cached);
+      }
+    } finally {
+      if (lock != null) {
+        lock.unlock();
+      }
+    }
   }
 
   /**

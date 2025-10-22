@@ -32,6 +32,7 @@ import io.javaoperatorsdk.operator.api.reconciler.Context;
 import io.javaoperatorsdk.operator.api.reconciler.ControllerConfiguration;
 import io.javaoperatorsdk.operator.api.reconciler.DeleteControl;
 import io.javaoperatorsdk.operator.api.reconciler.EventSourceContext;
+import io.javaoperatorsdk.operator.api.reconciler.PrimaryUpdateAndCacheUtils;
 import io.javaoperatorsdk.operator.api.reconciler.Reconciler;
 import io.javaoperatorsdk.operator.api.reconciler.UpdateControl;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
@@ -104,13 +105,16 @@ public class ExternalStateReconciler
             .withData(Map.of(ID_KEY, createdResource.getId()))
             .build();
     configMap.addOwnerReference(resource);
-    configMap = context.getClient().configMaps().resource(configMap).create();
 
     var primaryID = ResourceID.fromResource(resource);
     // Making sure that the created resources are in the cache for the next reconciliation.
     // This is critical in this case, since on next reconciliation if it would not be in the cache
     // it would be created again.
-    configMapEventSource.handleRecentResourceCreate(primaryID, configMap);
+    PrimaryUpdateAndCacheUtils.updateAndCacheSecondaryResource(
+        configMap,
+        context,
+        configMapEventSource,
+        toCreate -> context.getClient().configMaps().resource(toCreate).create());
     externalResourceEventSource.handleRecentResourceCreate(primaryID, createdResource);
   }
 
